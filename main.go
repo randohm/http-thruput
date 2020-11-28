@@ -9,10 +9,10 @@ import (
     "strings"
     "os"
     "path"
-    "bytes"
     "time"
     "sync"
     "io"
+    "errors"
 )
 
 const (
@@ -25,9 +25,14 @@ const (
     defaultGetSize = "1g"
     defaultHost = "localhost"
     defaultHostPost = 8080
+    defaultParallelRun = true
+    defaultRunPost = true
+    defaultRunGet = true
+
     downloadPath = "/down"
     uploadPath = "/up"
     uploadContentType = "application/octet-stream"
+    byteStringRegex = "^([0-9]+)([bBkKmMgG]?)$"
 )
 
 var (
@@ -59,7 +64,7 @@ func downloadRequestHandler(w http.ResponseWriter, r *http.Request) {
     query := r.URL.Query()
     if query["s"] != nil {
         // Validate input. Make sure it is only a string of numbers with an optional 1-char suffix
-        matched, err := regexp.MatchString("^([0-9]+)([bBkKmMgG]?)$", query["s"][0])
+        matched, err := regexp.MatchString(byteStringRegex, query["s"][0])
         if err != nil {
             http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
             log.Print(err)
@@ -101,14 +106,13 @@ func downloadRequestHandler(w http.ResponseWriter, r *http.Request) {
 // Returns int64 with the number of bytes
 func getByteCount(bytes string) (int64, error) {
     // Validate input
-    matched, err := regexp.MatchString("^([0-9]+)([bBkKmMgG]?)$", bytes)
+    matched, err := regexp.MatchString(byteStringRegex, bytes)
     if err != nil {
         log.Print(err)
         return -1, err
     }
     if !matched {
-        log.Printf("Incorrect request format")
-        return -1, err
+        return -1, errors.New("Incorrect request format")
     }
 
     var count int64
@@ -124,13 +128,13 @@ func getByteCount(bytes string) (int64, error) {
 func ppByteCount(numBytes float64) string {
     switch {
         case numBytes > float64(multiplier["g"]):
-            return fmt.Sprintf("%0.2f GiB", numBytes/float64(multiplier["g"]))
+            return fmt.Sprintf("%.2f GiB", numBytes/float64(multiplier["g"]))
         case numBytes > float64(multiplier["m"]):
-            return fmt.Sprintf("%0.2f MiB", numBytes/float64(multiplier["m"]))
+            return fmt.Sprintf("%.2f MiB", numBytes/float64(multiplier["m"]))
         case numBytes > float64(multiplier["k"]):
-            return fmt.Sprintf("%0.2f KiB", numBytes/float64(multiplier["k"]))
+            return fmt.Sprintf("%.2f KiB", numBytes/float64(multiplier["k"]))
     }
-    return fmt.Sprintf("%0.2f B", numBytes)
+    return fmt.Sprintf("%.2f B", numBytes)
 }
 
 
@@ -170,7 +174,7 @@ func uploadRequestHandler(w http.ResponseWriter, r *http.Request) {
 
 // Sets up the HTTP listener
 func runServer(listenAddress string) {
-    segment = []byte(strings.Repeat("1", *segmentSize)) // Initialize
+    segment = []byte(strings.Repeat("1", *segmentSize)) // Initialize dummy data
     http.HandleFunc(downloadPath, downloadRequestHandler)
     http.HandleFunc(uploadPath, uploadRequestHandler)
 
@@ -180,16 +184,25 @@ func runServer(listenAddress string) {
 
 
 
-// Sets up the GET and POST tests
-func runClient(postUrl string, postSize string, getUrl string) {
+// Sets up the GET and POST tests.
+// 'parallel' determines if the tests are run in series or parallel
+func runClient(runGet bool, getUrl string, getSize string, runPost bool, postUrl string, postSize string, parallel bool) {
     var wg sync.WaitGroup
-    wg.Add(1)
-    //runPostTest(&wg, postUrl, postSize)
-    //*
-    go runPostTest(&wg, postUrl, postSize)
-    wg.Add(1)
-    go runGetTest(&wg, getUrl)
-    //*/
+    if parallel && runGet && runPost {
+        wg.Add(1)
+        go runPostTest(&wg, postUrl, postSize)
+        wg.Add(1)
+        go runGetTest(&wg, getUrl)
+    } else {
+        if runGet {
+            wg.Add(1)
+            runGetTest(&wg, getUrl)
+        }
+        if runPost {
+            wg.Add(1)
+            runPostTest(&wg, postUrl, postSize)
+        }
+    }
     wg.Wait()
 }
 
@@ -210,6 +223,7 @@ func runGetTest(wg *sync.WaitGroup, getUrl string) {
     }
     for {
         bytesRead, err := res.Body.Read(buffer)
+        bodySize += int64(bytesRead)
         if err != nil {
             if err == io.EOF {
                 break
@@ -217,7 +231,6 @@ func runGetTest(wg *sync.WaitGroup, getUrl string) {
             log.Print(err)
             return
         }
-        bodySize += int64(bytesRead)
     }
     stopTime := time.Now()
     elapsed := stopTime.Sub(startTime)
@@ -228,12 +241,14 @@ func runGetTest(wg *sync.WaitGroup, getUrl string) {
     }
 
     dlRate := float64(bodySize)/float64(elapsed.Milliseconds())*1000
-    log.Printf("GET Rate: %s/sec", ppByteCount(dlRate))
+    log.Printf("GET Rate: %s/sec Received: %s Elapsed: %.3fs", ppByteCount(dlRate), ppByteCount(float64(bodySize)), elapsed.Seconds())
 }
 
 
 
 // POSTs to postUrl with postSize amount of data.
+// To reduce memory use, the io.Reader passed to http.Post() is
+// fed data from a pipe and written to from a go routine.
 func runPostTest(wg *sync.WaitGroup, postUrl string, postSize string) {
     defer wg.Done()
     numBytes, err := getByteCount(postSize)
@@ -241,10 +256,32 @@ func runPostTest(wg *sync.WaitGroup, postUrl string, postSize string) {
         log.Print(err)
         return
     }
-    postData := []byte(strings.Repeat("1", int(numBytes)))
+
+    pipeR, pipeW:= io.Pipe() // Pipe to write post data
+    var writtenBytes int64 = 0  // Track number of bytes written
+
+    // Go routine for writing to the pipe
+    go func() {
+        dummyBlock := []byte(strings.Repeat("1", int(*segmentSize)))    // Allocate dummy data chunk
+        for writtenBytes < numBytes {
+            bytesLeft := numBytes - writtenBytes
+            if bytesLeft < int64(*segmentSize) {
+                // This will be the last chunk, fix the size
+                dummyBlock = dummyBlock[:bytesLeft]
+            }
+            b, err := pipeW.Write(dummyBlock)
+            writtenBytes += int64(b)
+            if err != nil {
+                log.Print(err)
+                return
+            }
+        }
+        pipeW.Close()
+    }()
+
     log.Printf("Posting %d bytes to '%s'", numBytes, postUrl)
     startTime := time.Now()
-    res, err := http.Post(postUrl, uploadContentType, bytes.NewBuffer(postData))
+    res, err := http.Post(postUrl, uploadContentType, pipeR)
     stopTime := time.Now()
     if err != nil {
         log.Print(err)
@@ -257,7 +294,7 @@ func runPostTest(wg *sync.WaitGroup, postUrl string, postSize string) {
 
     elapsed := stopTime.Sub(startTime)
     ulRate := float64(numBytes)/float64(elapsed.Milliseconds())*1000
-    log.Printf("POST Rate: %s/sec", ppByteCount(ulRate))
+    log.Printf("POST Rate: %s/sec Sent: %s Elapsed: %.3fs", ppByteCount(ulRate), ppByteCount(float64(writtenBytes)), elapsed.Seconds())
 }
 
 
@@ -277,14 +314,17 @@ func main() {
     segmentSize = flag.Int("segment.size", defaultSegmentSize, "Listen address for HTTP requests")
     mode := flag.String("mode", defaultMode, "'client' or 'server'")
     postUrl := flag.String("url.post", defaultPostUrl, "URL to post data for upload test")
-    postSize := flag.String("post", defaultPostSize, "Size of post data. 1g, 2M, 4k, etc.")
+    postSize := flag.String("size.post", defaultPostSize, "Size of post data. 1g, 2M, 4k, etc.")
     getUrl := flag.String("url.get", defaultGetUrl, "URL to get data for download test")
-    //getSize := flag.String("get", defaultGetSize, "Size of get data. 1g, 2M, 4k, etc.")
+    getSize := flag.String("size.get", defaultGetSize, "Size of get data. 1g, 2M, 4k, etc.")
+    parallelRun := flag.Bool("parallel", defaultParallelRun, "Run client in parallel or series")
+    runGet := flag.Bool("run.get", defaultRunGet, "Run GET test. False is only effective with -parallel=0")
+    runPost := flag.Bool("run.post", defaultRunPost, "Run POST test. False is only effective with -parallel=0")
     flag.Parse()
 
     log.Printf("Using segment size %d", *segmentSize)
     if *mode == "client" {
-        runClient(*postUrl, *postSize, *getUrl)
+        runClient(*runGet, *getUrl, *getSize, *runPost, *postUrl, *postSize, *parallelRun)
     } else if *mode == "server" {
         runServer(*listenAddress)
     } else {
