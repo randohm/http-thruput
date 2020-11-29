@@ -1,4 +1,4 @@
-# http-bandwidth-test
+# http-thruput
 
 Server and client to generate bandwidth usage over HTTP.
 The goal is to have a small standalone binary that can serve several GBs of dummy data to multiple concurrent clients.
@@ -7,7 +7,7 @@ Memory usage is kept low, but CPU had to be sacrificed to manage that.
 ## Options
 ```
   -host string
-    	Hostname of server running http-bandwidth-test (default "localhost")
+    	Hostname of server running http-thruput (default "localhost")
   -mode string
     	Run in 'client' or 'server' mode. (default "server")
   -parallel
@@ -39,7 +39,7 @@ There are 2 valid URLs: `/up` and `/down`.
 
 __URL:__ `http://<hostname>:<port>/down?s=<bytes>`
 
-hostname: The hostname of the remote server running `http-bandwidth-test` in server mode.
+hostname: The hostname of the remote server running `http-thruput` in server mode.
 port: The TCP port number.
 bytes: The number of bytes to present to the client.
 
@@ -69,23 +69,23 @@ The client can post the dummy data as the body of the request.
 
 Example:
 ```
-http-bandwidth-test -mode client -host remotehost -port 80 -size 10g
+http-thruput -mode client -host remotehost -port 80 -size 10g
 ```
 This will run tests against `http://remotehost:80/` using 10 GiB of dummy data in parallel.
 The download and upload tests (GET and PUT, respectively) can be run in series or parallel.
 
 Run in series:
 ```
-http-bandwidth-test -mode client -parallel=0
+http-thruput -mode client -parallel=0
 ```
 
 Run get/download test only:
 ```
-http-bandwidth-test -mode client -run.post=0
+http-thruput -mode client -run.post=0
 ```
 
 Run post/upload test only:
 ```
-http-bandwidth-test -mode client -run.get=0
+http-thruput -mode client -run.get=0
 ```
 

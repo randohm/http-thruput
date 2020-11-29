@@ -337,7 +337,7 @@ func main() {
     parallelRun := flag.Bool("parallel", defaultParallelRun, "Run client in parallel or series")
     runGet := flag.Bool("run.get", defaultRunGet, "Run GET test.")
     runPost := flag.Bool("run.post", defaultRunPost, "Run POST test.")
-    remoteHost := flag.String("host", defaultRemoteHost, "Hostname of server running http-bandwidth-test")
+    remoteHost := flag.String("host", defaultRemoteHost, "Hostname of server running http-thruput")
     remotePort := flag.Int("port", defaultRemotePort, "Remote server port")
     flag.Parse()
 
