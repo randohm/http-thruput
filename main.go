@@ -19,12 +19,10 @@ const (
     defaultListenAddress = "0.0.0.0:8080"
     defaultSegmentSize = 10485760
     defaultMode = "server"
-    defaultPostUrl = "http://localhost:8080"+uploadPath
-    defaultPostSize = "1g"
-    defaultGetUrl = "http://localhost:8080"+downloadPath+"?s=1g"
     defaultGetSize = "1g"
-    defaultHost = "localhost"
-    defaultHostPost = 8080
+    defaultPostSize = "1g"
+    defaultRemoteHost = "localhost"
+    defaultRemotePort = 8080
     defaultParallelRun = true
     defaultRunPost = true
     defaultRunGet = true
@@ -88,11 +86,19 @@ func downloadRequestHandler(w http.ResponseWriter, r *http.Request) {
         // Send bytes
         for i := int64(0) ; i < numBytes ; i++ {
             if i < numBytes - int64(*segmentSize) {
-                w.Write(segment)
+                _, err = w.Write(segment)
+                if err != nil {
+                    log.Print(err)
+                    return
+                }
                 i += int64(*segmentSize)
             } else {
                 bytesLeft := numBytes - i
-                w.Write(segment[:bytesLeft])
+                _, err := w.Write(segment[:bytesLeft])
+                if err != nil {
+                    log.Print(err)
+                    return
+                }
                 i = numBytes
             }
         }
@@ -146,12 +152,6 @@ func uploadRequestHandler(w http.ResponseWriter, r *http.Request) {
         http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
         return
     }
-    err := r.ParseForm()
-    if err != nil {
-        http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-        log.Print(err)
-        return
-    }
 
     var buffer = make([]byte, *segmentSize)
     var bodySize int64 = 0
@@ -184,36 +184,51 @@ func runServer(listenAddress string) {
 
 
 
-// Sets up the GET and POST tests.
-// 'parallel' determines if the tests are run in series or parallel
-func runClient(runGet bool, getUrl string, getSize string, runPost bool, postUrl string, postSize string, parallel bool) {
-    var wg sync.WaitGroup
+/*
+    Calls the GET and POST tests. Manages sync for parallel execution.
+    Args:
+      remoteHost: hostname/IP of HTTP server
+      remotePort: TCP port on HTTP server
+      runGet: if false, don't run the get test
+      getSize: size of data to use on the get test
+      runPost: if false, don't run the post test
+      postSize: size of data to use on the post tesl
+      parallel: if true, run tests in parallel. Run in series if false.
+*/
+func runClient(remoteHost string, remotePort int, runGet bool, getSize string, runPost bool, postSize string, parallel bool) {
+    // Generate URLs
+    postUrl := fmt.Sprintf("http://%s:%d%s", remoteHost, remotePort, uploadPath)
+    getUrl := fmt.Sprintf("http://%s:%d%s?s=%s", remoteHost, remotePort, downloadPath, getSize)
+
+    // Run tests
     if parallel && runGet && runPost {
+        var wg sync.WaitGroup
         wg.Add(1)
-        go runPostTest(&wg, postUrl, postSize)
+        go runPostTest(postUrl, postSize, &wg)
         wg.Add(1)
-        go runGetTest(&wg, getUrl)
+        go runGetTest(getUrl, &wg)
+        wg.Wait()
     } else {
         if runGet {
-            wg.Add(1)
-            runGetTest(&wg, getUrl)
+            runGetTest(getUrl, nil)
         }
         if runPost {
-            wg.Add(1)
-            runPostTest(&wg, postUrl, postSize)
+            runPostTest(postUrl, postSize, nil)
         }
     }
-    wg.Wait()
 }
 
 
 
 // GETs from getUrl. Reads and discards the data.
-func runGetTest(wg *sync.WaitGroup, getUrl string) {
-    defer wg.Done()
+func runGetTest(getUrl string, wg *sync.WaitGroup) {
+    if wg != nil {
+        defer wg.Done()
+    }
     var buffer = make([]byte, *segmentSize)
     var bodySize int64 = 0
 
+    // Make the GET call, read in and discard the body data
     log.Printf("Getting %s", getUrl)
     startTime := time.Now()
     res, err := http.Get(getUrl)
@@ -233,13 +248,13 @@ func runGetTest(wg *sync.WaitGroup, getUrl string) {
         }
     }
     stopTime := time.Now()
-    elapsed := stopTime.Sub(startTime)
     defer res.Body.Close()
     if res.StatusCode != 200 {
         log.Printf("Returned HTTP status %s", res.Status)
         return
     }
 
+    elapsed := stopTime.Sub(startTime)
     dlRate := float64(bodySize)/float64(elapsed.Milliseconds())*1000
     log.Printf("GET Rate: %s/sec Received: %s Elapsed: %.3fs", ppByteCount(dlRate), ppByteCount(float64(bodySize)), elapsed.Seconds())
 }
@@ -249,16 +264,18 @@ func runGetTest(wg *sync.WaitGroup, getUrl string) {
 // POSTs to postUrl with postSize amount of data.
 // To reduce memory use, the io.Reader passed to http.Post() is
 // fed data from a pipe and written to from a go routine.
-func runPostTest(wg *sync.WaitGroup, postUrl string, postSize string) {
-    defer wg.Done()
+func runPostTest(postUrl string, postSize string, wg *sync.WaitGroup) {
+    if wg != nil {
+        defer wg.Done()
+    }
+
+    pipeR, pipeW:= io.Pipe()    // Pipe to write post data
+    var writtenBytes int64 = 0  // Track number of bytes written
     numBytes, err := getByteCount(postSize)
     if err != nil {
         log.Print(err)
         return
     }
-
-    pipeR, pipeW:= io.Pipe() // Pipe to write post data
-    var writtenBytes int64 = 0  // Track number of bytes written
 
     // Go routine for writing to the pipe
     go func() {
@@ -279,6 +296,7 @@ func runPostTest(wg *sync.WaitGroup, postUrl string, postSize string) {
         pipeW.Close()
     }()
 
+    // Make the POST call
     log.Printf("Posting %d bytes to '%s'", numBytes, postUrl)
     startTime := time.Now()
     res, err := http.Post(postUrl, uploadContentType, pipeR)
@@ -311,20 +329,26 @@ func init() {
 
 func main() {
     listenAddress := flag.String("web.listen-address", defaultListenAddress, "Listen address for HTTP requests")
-    segmentSize = flag.Int("segment.size", defaultSegmentSize, "Listen address for HTTP requests")
-    mode := flag.String("mode", defaultMode, "'client' or 'server'")
-    postUrl := flag.String("url.post", defaultPostUrl, "URL to post data for upload test")
+    segmentSize = flag.Int("segment.size", defaultSegmentSize, "Segment size for in-memory file chunks")
+    mode := flag.String("mode", defaultMode, "Run in 'client' or 'server' mode.")
+    testSize := flag.String("size", "", "Size of data. 1g, 2M, 4k, etc. Overrides -size.post and -size.get.")
     postSize := flag.String("size.post", defaultPostSize, "Size of post data. 1g, 2M, 4k, etc.")
-    getUrl := flag.String("url.get", defaultGetUrl, "URL to get data for download test")
     getSize := flag.String("size.get", defaultGetSize, "Size of get data. 1g, 2M, 4k, etc.")
     parallelRun := flag.Bool("parallel", defaultParallelRun, "Run client in parallel or series")
-    runGet := flag.Bool("run.get", defaultRunGet, "Run GET test. False is only effective with -parallel=0")
-    runPost := flag.Bool("run.post", defaultRunPost, "Run POST test. False is only effective with -parallel=0")
+    runGet := flag.Bool("run.get", defaultRunGet, "Run GET test.")
+    runPost := flag.Bool("run.post", defaultRunPost, "Run POST test.")
+    remoteHost := flag.String("host", defaultRemoteHost, "Hostname of server running http-bandwidth-test")
+    remotePort := flag.Int("port", defaultRemotePort, "Remote server port")
     flag.Parse()
+
+    if *testSize != "" {
+        *getSize = *testSize
+        *postSize = *testSize
+    }
 
     log.Printf("Using segment size %d", *segmentSize)
     if *mode == "client" {
-        runClient(*runGet, *getUrl, *getSize, *runPost, *postUrl, *postSize, *parallelRun)
+        runClient(*remoteHost, *remotePort, *runGet, *getSize, *runPost, *postSize, *parallelRun)
     } else if *mode == "server" {
         runServer(*listenAddress)
     } else {
