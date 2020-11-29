@@ -1,3 +1,3 @@
-module http-bandwidth-test
+module http-thruput
 
 go 1.15
