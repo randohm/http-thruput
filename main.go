@@ -17,7 +17,7 @@ import (
 
 const (
     defaultListenAddress = "0.0.0.0:8080"
-    defaultSegmentSize = 10485760
+    defaultChunkSize = 10485760
     defaultMode = "server"
     defaultGetSize = "1g"
     defaultPostSize = "1g"
@@ -45,9 +45,9 @@ var (
         "g": 1073741824,
         "G": 1000000000,
     }
-    segmentSize *int
-    segment []byte
-    usageText = "[-h|-help] [-web.listen-address 0.0.0.0:8080] [-segment.size 1000000]"
+    chunkSize *int
+    chunk []byte
+    usageText = "[-h|-help] [-web.listen-address 0.0.0.0:8080] [-chunk.size 1000000]"
     helpText = "Small webserver for bandwidth testing.\n"+
         "Accepts parameter `s` with a value for the number of bytes\n"+
         "Example values of `s`: 1g, 20M, 123412\n\n"+
@@ -81,20 +81,21 @@ func downloadRequestHandler(w http.ResponseWriter, r *http.Request) {
             log.Print(err)
             return
         }
-        log.Printf("Sending %d bytes", numBytes)
+        //log.Printf("Sending %d bytes", numBytes)
 
         // Send bytes
+        startTime := time.Now()
         for i := int64(0) ; i < numBytes ; i++ {
-            if i < numBytes - int64(*segmentSize) {
-                _, err = w.Write(segment)
+            if i < numBytes - int64(*chunkSize) {
+                _, err = w.Write(chunk)
                 if err != nil {
                     log.Print(err)
                     return
                 }
-                i += int64(*segmentSize)
+                i += int64(*chunkSize)
             } else {
                 bytesLeft := numBytes - i
-                _, err := w.Write(segment[:bytesLeft])
+                _, err := w.Write(chunk[:bytesLeft])
                 if err != nil {
                     log.Print(err)
                     return
@@ -102,6 +103,10 @@ func downloadRequestHandler(w http.ResponseWriter, r *http.Request) {
                 i = numBytes
             }
         }
+        stopTime := time.Now()
+        elapsed := stopTime.Sub(startTime)
+        rate := float64(numBytes)/float64(elapsed.Milliseconds())*1000
+        log.Printf("%s sent %s @ %s/sec in %.3fs", r.RemoteAddr, ppByteCount(float64(numBytes)), ppByteCount(rate), elapsed.Seconds())
     }
 }
 
@@ -153,8 +158,9 @@ func uploadRequestHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    var buffer = make([]byte, *segmentSize)
+    var buffer = make([]byte, *chunkSize)
     var bodySize int64 = 0
+    startTime := time.Now()
     for {
         bytesRead, err := r.Body.Read(buffer)
         bodySize += int64(bytesRead)
@@ -167,19 +173,25 @@ func uploadRequestHandler(w http.ResponseWriter, r *http.Request) {
             return
         }
     }
-    log.Printf("Received %d bytes\n", bodySize)
+    stopTime := time.Now()
+    elapsed := stopTime.Sub(startTime)
+    ulRate := float64(bodySize)/float64(elapsed.Milliseconds())*1000
+    log.Printf("%s received %s @ %s/sec in %.3fs", r.RemoteAddr, ppByteCount(float64(bodySize)), ppByteCount(ulRate), elapsed.Seconds())
 }
 
 
 
 // Sets up the HTTP listener
 func runServer(listenAddress string) {
-    segment = []byte(strings.Repeat("1", *segmentSize)) // Initialize dummy data
+    chunk = []byte(strings.Repeat("1", *chunkSize)) // Initialize dummy data
     http.HandleFunc(downloadPath, downloadRequestHandler)
     http.HandleFunc(uploadPath, uploadRequestHandler)
 
     log.Printf("Listening on %s", listenAddress)
-    http.ListenAndServe(listenAddress, nil)
+    err := http.ListenAndServe(listenAddress, nil)
+    if err != nil {
+        log.Fatal(err)
+    }
 }
 
 
@@ -225,7 +237,7 @@ func runGetTest(getUrl string, wg *sync.WaitGroup) {
     if wg != nil {
         defer wg.Done()
     }
-    var buffer = make([]byte, *segmentSize)
+    var buffer = make([]byte, *chunkSize)
     var bodySize int64 = 0
 
     // Make the GET call, read in and discard the body data
@@ -279,10 +291,10 @@ func runPostTest(postUrl string, postSize string, wg *sync.WaitGroup) {
 
     // Go routine for writing to the pipe
     go func() {
-        dummyBlock := []byte(strings.Repeat("1", int(*segmentSize)))    // Allocate dummy data chunk
+        dummyBlock := []byte(strings.Repeat("1", int(*chunkSize)))    // Allocate dummy data chunk
         for writtenBytes < numBytes {
             bytesLeft := numBytes - writtenBytes
-            if bytesLeft < int64(*segmentSize) {
+            if bytesLeft < int64(*chunkSize) {
                 // This will be the last chunk, fix the size
                 dummyBlock = dummyBlock[:bytesLeft]
             }
@@ -329,7 +341,7 @@ func init() {
 
 func main() {
     listenAddress := flag.String("web.listen-address", defaultListenAddress, "Listen address for HTTP requests")
-    segmentSize = flag.Int("segment.size", defaultSegmentSize, "Segment size for in-memory file chunks")
+    chunkSize = flag.Int("chunk.size", defaultChunkSize, "Chunk size for in-memory file chunks")
     mode := flag.String("mode", defaultMode, "Run in 'client' or 'server' mode.")
     testSize := flag.String("size", "", "Size of data. 1g, 2M, 4k, etc. Overrides -size.post and -size.get.")
     postSize := flag.String("size.post", defaultPostSize, "Size of post data. 1g, 2M, 4k, etc.")
@@ -346,7 +358,7 @@ func main() {
         *postSize = *testSize
     }
 
-    log.Printf("Using segment size %d", *segmentSize)
+    log.Printf("Using chunk size %d", *chunkSize)
     if *mode == "client" {
         runClient(*remoteHost, *remotePort, *runGet, *getSize, *runPost, *postSize, *parallelRun)
     } else if *mode == "server" {
