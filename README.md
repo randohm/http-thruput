@@ -35,6 +35,12 @@ Memory usage is kept low, but CPU had to be sacrificed to manage that.
 This is the default mode.
 There are 2 valid URLs: `/up` and `/down`.
 
+Example:
+```
+http-thruput -web.listen-address 1.2.3.4:8888
+```
+This runs `http-thruput` as a server binding to IP 1.2.3.4 on port 8888
+
 ### Download Tests
 
 __URL:__ `http://<hostname>:<port>/down?s=<bytes>`
