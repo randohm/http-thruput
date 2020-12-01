@@ -39,9 +39,9 @@ There are 2 valid URLs: `/up` and `/down`.
 
 __URL:__ `http://<hostname>:<port>/down?s=<bytes>`
 
-hostname: The hostname of the remote server running `http-thruput` in server mode.
-port: The TCP port number.
-bytes: The number of bytes to present to the client.
+hostname: The hostname of the remote server running `http-thruput` in server mode.  
+port: The TCP port number.  
+bytes: The number of bytes to present to the client.  
 
 #### The 's' Parameter
 
