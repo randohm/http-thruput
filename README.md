@@ -2,7 +2,7 @@
 
 Server and client to generate bandwidth usage over HTTP.
 The goal is to have a small standalone binary that can serve several GBs of dummy data to multiple concurrent clients.
-Memory usage is kept low, but CPU had to be sacrificed to manage that.
+No disk I/O and memory usage is kept low. Higher CPU use had to be sacrificed to manage that.
 
 ## Options
 ```
